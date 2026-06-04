@@ -1,14 +1,20 @@
 """
-IFC Prospect Lookup
-===================
-Single-page tool for IFC Finance & Control.
-Workflow: Search → Pick company → Enter financials → Get assessment.
-Run: streamlit run app.py
+IFC Prospect Lookup — v2 (redesigned UI)
+=========================================
+Same logic as app.py. Visual overhaul:
+  - Wide layout with sidebar for search + step tracker
+  - Custom CSS: card containers, IFC navy/green palette, proper typography
+  - Signal breakdown rendered as styled cards instead of st.metric
+  - Header strip with IFC branding
+Run: streamlit run app_v2.py
 """
 
 import json
 import time
+import base64
+import os
 from datetime import date, datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -23,8 +29,315 @@ from utils.fetchers import (
 from utils.report import build_pdf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-st.set_page_config(page_title="IFC Prospect Lookup", page_icon="🔍", layout="centered")
+st.set_page_config(
+    page_title="IFC Prospect Lookup",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 require_auth()
+
+# ─────────────────────────────────────────────────────────────
+# STYLING
+# ─────────────────────────────────────────────────────────────
+
+def _logo_b64():
+    """Return base64-encoded dark-background logo for sidebar."""
+    for fname in ("logo_dark.svg", "ifc_logo_dark.svg", "ifc_logo.png", "ifc_logo.svg", "logo.png", "logo.svg"):
+        p = Path(__file__).parent / fname
+        if p.exists():
+            mime = "image/svg+xml" if fname.endswith(".svg") else "image/png"
+            data = base64.b64encode(p.read_bytes()).decode()
+            return f"data:{mime};base64,{data}"
+    return None
+
+LOGO_SRC = _logo_b64()
+
+CSS = """
+<style>
+/* ── Reset sidebar padding ── */
+[data-testid="stSidebar"] {
+    background: #0d2240;
+    padding-top: 0 !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+    padding-top: 0 !important;
+}
+
+/* ── Sidebar header strip ── */
+.sidebar-header {
+    background: #0d2240;
+    padding: 24px 20px 18px 20px;
+    border-bottom: 2px solid #2a6b3c;
+    margin-bottom: 20px;
+}
+.sidebar-header img {
+    max-width: 160px;
+    display: block;
+    margin-bottom: 8px;
+}
+.sidebar-header .app-title {
+    font-family: 'Georgia', serif;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a8c4d4;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-top: 4px;
+}
+
+/* ── Step tracker ── */
+.step-list {
+    list-style: none;
+    padding: 0 20px;
+    margin: 0 0 24px 0;
+}
+.step-list li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 13px;
+    color: #7a9ab5;
+    border-left: 2px solid #1e3a5f;
+    padding-left: 14px;
+    margin-left: 8px;
+}
+.step-list li.active {
+    color: #e8f4f0;
+    border-left-color: #2a6b3c;
+    font-weight: 600;
+}
+.step-list li.done {
+    color: #4aaa6e;
+    border-left-color: #2a6b3c;
+}
+.step-num {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #1e3a5f;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    flex-shrink: 0;
+    color: #7a9ab5;
+}
+.step-list li.active .step-num {
+    background: #2a6b3c;
+    color: #fff;
+}
+.step-list li.done .step-num {
+    background: #1e4d2b;
+    color: #4aaa6e;
+}
+
+/* ── Sidebar section label ── */
+.sidebar-section {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #4a7a9b;
+    padding: 0 20px;
+    margin-bottom: 8px;
+}
+
+/* ── Sidebar input labels ── */
+[data-testid="stSidebar"] label {
+    color: #a8c4d4 !important;
+    font-size: 12px !important;
+}
+[data-testid="stSidebar"] .stTextInput input,
+[data-testid="stSidebar"] .stSelectbox > div > div {
+    background: #1a3050 !important;
+    border-color: #2a4a6b !important;
+    color: #e8f0f8 !important;
+}
+
+/* ── Main content area ── */
+.main-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 0 16px 0;
+    border-bottom: 1px solid #e2e6ea;
+    margin-bottom: 24px;
+}
+.main-header h1 {
+    font-family: 'Georgia', serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: #0d2240;
+    margin: 0;
+}
+.main-header .subtitle {
+    font-size: 13px;
+    color: #6c7a89;
+    margin-top: 2px;
+}
+.lookup-counter {
+    font-size: 12px;
+    color: #9aaab8;
+    background: #f0f3f7;
+    padding: 4px 10px;
+    border-radius: 12px;
+}
+
+/* ── Card wrapper ── */
+.ifc-card {
+    background: #ffffff;
+    border: 1px solid #e2e6ea;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(13,34,64,0.06);
+}
+.ifc-card h3, .ifc-card h4 {
+    font-family: 'Georgia', serif;
+    color: #0d2240;
+    margin-top: 0;
+}
+.card-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #9aaab8;
+    margin-bottom: 4px;
+}
+
+/* ── Verdict banner ── */
+.verdict-proceed {
+    background: linear-gradient(135deg, #1e4d2b 0%, #2a6b3c 100%);
+    color: #fff;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+}
+.verdict-caution {
+    background: linear-gradient(135deg, #5c4200 0%, #8a6200 100%);
+    color: #fff;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+}
+.verdict-stop {
+    background: linear-gradient(135deg, #5c1010 0%, #8a1818 100%);
+    color: #fff;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 16px;
+}
+.verdict-title {
+    font-family: 'Georgia', serif;
+    font-size: 20px;
+    font-weight: 700;
+    margin: 0 0 4px 0;
+}
+.verdict-meta {
+    font-size: 12px;
+    opacity: 0.75;
+    margin: 0;
+}
+
+/* ── Score ring (text only, CSS fake-ring) ── */
+.score-display {
+    font-family: 'Georgia', serif;
+    font-size: 48px;
+    font-weight: 700;
+    line-height: 1;
+    color: #fff;
+    margin-bottom: 2px;
+}
+.score-max {
+    font-size: 14px;
+    opacity: 0.6;
+}
+
+/* ── Signal cards ── */
+.signal-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+.signal-card {
+    background: #f8f9fb;
+    border: 1px solid #e2e6ea;
+    border-radius: 6px;
+    padding: 14px 16px;
+    border-left: 3px solid #ddd;
+}
+.signal-card.green  { border-left-color: #2a6b3c; }
+.signal-card.yellow { border-left-color: #c48f00; }
+.signal-card.red    { border-left-color: #8a1818; }
+.signal-factor {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #9aaab8;
+    margin-bottom: 4px;
+}
+.signal-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #0d2240;
+    margin-bottom: 2px;
+}
+.signal-pts {
+    font-size: 11px;
+    color: #9aaab8;
+}
+
+/* ── Company detail table ── */
+.detail-row {
+    display: flex;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #f0f3f7;
+    font-size: 13px;
+}
+.detail-row:last-child { border-bottom: none; }
+.detail-key {
+    color: #9aaab8;
+    font-weight: 600;
+    width: 130px;
+    flex-shrink: 0;
+    font-size: 12px;
+}
+.detail-val { color: #0d2240; }
+
+/* ── News items ── */
+.news-item {
+    padding: 8px 0;
+    border-bottom: 1px solid #f0f3f7;
+    font-size: 13px;
+}
+.news-item:last-child { border-bottom: none; }
+
+/* ── Divider replacement ── */
+.section-gap { margin: 20px 0; }
+
+/* ── Hide default streamlit top padding ── */
+.block-container { padding-top: 0 !important; }
+
+/* ── Export buttons ── */
+.stDownloadButton button {
+    border-radius: 6px !important;
+    font-size: 13px !important;
+}
+</style>
+"""
+
+st.markdown(CSS, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# SCORING  (identical to app.py — do not modify)
+# ─────────────────────────────────────────────────────────────
 
 MAX_LOOKUPS = 20
 _DEFAULTS = [
@@ -37,26 +350,8 @@ for k, v in _DEFAULTS:
         st.session_state[k] = v
 
 
-# ─────────────────────────────────────────────────────────────
-# SCORING
-# ─────────────────────────────────────────────────────────────
-#
-# Total possible = 100 (sum of max_pts below).
-#   Revenue         40
-#   Net Result      20
-#   Legal Status    15
-#   Company Age     10
-#   Country Risk    10
-#   LEI              5
-#   (Revenue Trend and Filing Health are modifiers, not additive pts —
-#    they can downgrade a verdict or flag the result, but don't change the 0-100 scale.)
-#
-# Rationale: the Finance & Control team cares most about money.
-# Revenue + profit together account for 60/100 of the score.
-# ─────────────────────────────────────────────────────────────
-
 def revenue_pts(rev):
-    if not rev:                       return 0,  "Not entered"
+    if not rev:                        return 0,  "Not entered"
     if rev >= 500_000_000: return 40, f"€{rev/1e9:.1f}B"
     if rev >= 100_000_000: return 35, f"€{rev/1e6:.0f}M"
     if rev >= 25_000_000:  return 28, f"€{rev/1e6:.1f}M"
@@ -89,7 +384,6 @@ def compute_score(data, revenue, net_result):
     signals = {}
     hard_flags = []
 
-    # ── Hard stops ───────────────────────────────────────────
     if san.get("flagged"):
         return {"score": 0, "verdict": "do_not_proceed",
                 "signals": {"Sanctions": ("FLAGGED 🚨", 0, 0)},
@@ -108,7 +402,6 @@ def compute_score(data, revenue, net_result):
                 "signals": {"Legal Status": ("Inactive / Dissolved", 0, 15)},
                 "hard_flags": ["Company is inactive or dissolved"], "summary_data": {}}
 
-    # ── Financial inputs (auto > manual) ─────────────────────
     auto_rev = fin.get("revenue") if fin.get("found") and fin.get("revenue") else None
     auto_net = fin.get("net_income") if fin.get("found") else None
     final_rev = auto_rev or revenue or 0
@@ -146,22 +439,20 @@ def compute_score(data, revenue, net_result):
         l_pts, l_lbl = 2, "Not found"
     signals["LEI"] = (l_lbl, l_pts, 5)
 
-    total = r_pts + n_pts + s_pts + a_pts + c_pts + l_pts  # max 100
+    total = r_pts + n_pts + s_pts + a_pts + c_pts + l_pts
 
-    # ── Modifiers (not scored additively, but flagged) ──────
     soft_flags = []
-
     trend_label = fin.get("trend_label")
     yoy_pct = fin.get("yoy_pct")
     if trend_label == "declining" and yoy_pct is not None:
         soft_flags.append(f"Revenue declining {yoy_pct:+.0%} year-over-year")
-        total -= 5  # small penalty for revenue decline
+        total -= 5
     elif trend_label == "growing" and yoy_pct is not None:
         soft_flags.append(f"Revenue growing {yoy_pct:+.0%} year-over-year")
 
     if profile.get("accounts_overdue"):
         soft_flags.append("Accounts overdue at Companies House")
-        total -= 8  # late filings correlate with distress
+        total -= 8
     if profile.get("confirmation_overdue"):
         soft_flags.append("Confirmation statement overdue")
         total -= 3
@@ -169,7 +460,6 @@ def compute_score(data, revenue, net_result):
         soft_flags.append("Prior insolvency history")
         total -= 5
 
-    # News modifier — count credit-negative headlines
     if news.get("found") and news.get("articles"):
         neg_count = sum(1 for a in news["articles"] if a.get("sentiment") == "negative")
         if neg_count >= 2:
@@ -262,7 +552,6 @@ def build_summary(name, result, data):
 
 
 def build_assessment_json(name, selected, result, data):
-    """Everything the assessment was based on, for audit/handover."""
     return {
         "assessment": {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -287,11 +576,8 @@ def build_assessment_json(name, selected, result, data):
 
 
 # ─────────────────────────────────────────────────────────────
-# UI
+# HELPERS
 # ─────────────────────────────────────────────────────────────
-
-st.markdown("## 🔍 IFC Prospect Lookup")
-st.caption("Search a company, enter their revenue, get an instant credit risk assessment.")
 
 JURISDICTION_MAP = {
     "Any country": "", "Netherlands": "nl", "United Kingdom": "gb",
@@ -302,29 +588,160 @@ JURISDICTION_MAP = {
     "Poland": "pl", "Sweden": "se", "Denmark": "dk", "Norway": "no",
 }
 
-col1, col2, col3 = st.columns([4, 2, 1])
-with col1:
-    company_name = st.text_input(
-        "Company", placeholder="…",
-        label_visibility="collapsed",
-    )
-with col2:
-    country = st.selectbox("Country", list(JURISDICTION_MAP.keys()), label_visibility="collapsed")
-with col3:
+
+def _current_step():
+    """Return 1-5 based on how far through the workflow we are."""
+    if st.session_state.get("financials_applied") or st.session_state.get("analysis_data"):
+        data_tuple = st.session_state.get("analysis_data")
+        if data_tuple and st.session_state.get("financials_applied"):
+            return 5
+        if data_tuple:
+            return 4
+    if st.session_state.get("selected_co"):
+        return 3
+    if st.session_state.get("candidates") is not None:
+        return 2
+    return 1
+
+
+def _signal_color(pts, max_pts):
+    if max_pts == 0:
+        return "red"
+    pct = pts / max_pts
+    return "green" if pct >= 0.75 else "yellow" if pct >= 0.45 else "red"
+
+
+def _render_signal_cards(signals):
+    """Render the 6 signal cards as a custom HTML grid."""
+    cards_html = '<div class="signal-grid">'
+    for factor, (label, pts, max_pts) in signals.items():
+        color = _signal_color(pts, max_pts)
+        icon = "●" if color == "green" else "◐" if color == "yellow" else "○"
+        cards_html += f"""
+        <div class="signal-card {color}">
+            <div class="signal-factor">{factor}</div>
+            <div class="signal-label">{label}</div>
+            <div class="signal-pts">{pts} / {max_pts} pts</div>
+        </div>"""
+    cards_html += "</div>"
+    st.markdown(cards_html, unsafe_allow_html=True)
+
+
+def _render_verdict_banner(verdict, display_name, score, fin_year):
+    cls = {"proceed": "verdict-proceed", "caution": "verdict-caution"}.get(verdict, "verdict-stop")
+    icon = {"proceed": "✓", "caution": "⚠", "do_not_proceed": "✕"}.get(verdict, "")
+    title = {
+        "proceed": f"{icon}  Proceed — {display_name}",
+        "caution": f"{icon}  Proceed with Caution — {display_name}",
+        "do_not_proceed": f"{icon}  Do Not Proceed — {display_name}",
+    }[verdict]
+
+    col_left, col_right = st.columns([5, 1])
+    with col_left:
+        st.markdown(f"""
+        <div class="{cls}">
+            <div class="verdict-title">{title}</div>
+            <div class="verdict-meta">FY{fin_year} · {date.today().isoformat()} · Internal use only</div>
+        </div>""", unsafe_allow_html=True)
+    with col_right:
+        score_color = "#2a6b3c" if verdict == "proceed" else "#c48f00" if verdict == "caution" else "#8a1818"
+        st.markdown(f"""
+        <div style="text-align:center; padding: 12px 0;">
+            <div style="font-family:Georgia,serif; font-size:52px; font-weight:700; color:{score_color}; line-height:1">{score}</div>
+            <div style="font-size:12px; color:#9aaab8; margin-top:2px">out of 100</div>
+        </div>""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    # Header / branding
+    if LOGO_SRC:
+        st.markdown(f"""
+        <div class="sidebar-header">
+            <img src="{LOGO_SRC}" alt="IFC logo">
+            <div class="app-title">Prospect Lookup</div>
+        </div>""", unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div class="sidebar-header">
+            <div style="font-family:Georgia,serif; font-size:22px; font-weight:700; color:#0d2240; margin-bottom:4px">IFC</div>
+            <div class="app-title">Prospect Lookup</div>
+        </div>""", unsafe_allow_html=True)
+
+    # Step tracker
+    step = _current_step()
+    steps = ["Search company", "Select match", "Fetch data", "Enter financials", "Assessment"]
+    items_html = ""
+    for i, label in enumerate(steps, 1):
+        cls = "done" if i < step else "active" if i == step else ""
+        num_content = "✓" if i < step else str(i)
+        items_html += f'<li class="{cls}"><span class="step-num">{num_content}</span>{label}</li>'
+    st.markdown(f'<ul class="step-list">{items_html}</ul>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section">Search</div>', unsafe_allow_html=True)
+
+    company_name = st.text_input("Company name", placeholder="e.g. Brenntag UK")
+    country = st.selectbox("Jurisdiction", list(JURISDICTION_MAP.keys()))
     search = st.button("Search", type="primary", use_container_width=True)
 
-st.divider()
+    if st.session_state["lookup_count"] > 0:
+        remaining = MAX_LOOKUPS - st.session_state["lookup_count"]
+        st.markdown(
+            f'<div style="font-size:11px; color:#4a7a9b; text-align:center; margin-top:8px">'
+            f'{remaining} lookups remaining this session</div>',
+            unsafe_allow_html=True
+        )
 
-if not company_name.strip():
-    st.markdown(
-        "Enter a company name and hit **Search**. "
-        "You'll pick the right company from the matches, "
-        "enter their revenue from their annual filing, "
-        "and get a full risk assessment."
-    )
+    # Reset button if there's an active search
+    if st.session_state.get("candidates") is not None:
+        st.markdown('<div style="margin-top: 16px"></div>', unsafe_allow_html=True)
+        if st.button("↩ New search", use_container_width=True):
+            for k in ["candidates", "selected_co", "analysis_data",
+                      "revenue", "net_result", "financials_applied"]:
+                st.session_state[k] = None if k in ["candidates", "selected_co", "analysis_data"] else 0
+            st.session_state["financials_applied"] = False
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────
+# MAIN AREA HEADER
+# ─────────────────────────────────────────────────────────────
+
+st.markdown("""
+<div class="main-header">
+    <div>
+        <div class="main-header h1" style="font-family:Georgia,serif; font-size:22px; font-weight:700; color:#0d2240;">
+            Credit Risk Screening
+        </div>
+        <div class="subtitle">Search a company, enter their revenue, get an instant risk assessment.</div>
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
+# IDLE STATE
+# ─────────────────────────────────────────────────────────────
+
+if not company_name.strip() and st.session_state.get("candidates") is None:
+    st.markdown("""
+    <div class="ifc-card" style="border-left: 3px solid #0d2240; max-width: 600px;">
+        <div class="card-label">How it works</div>
+        <div style="font-size:14px; color:#4a5568; line-height:1.7; margin-top:8px">
+            <b>1. Search</b> — enter a company name in the sidebar and select a jurisdiction.<br>
+            <b>2. Select</b> — pick the correct match from the results.<br>
+            <b>3. Review</b> — automatic data is fetched from Companies House, GLEIF, sanctions lists, and news.<br>
+            <b>4. Enter financials</b> — pre-filled where available, or enter manually from the filing.<br>
+            <b>5. Assess</b> — get a scored risk profile with a proceed / caution / do not proceed verdict.
+        </div>
+    </div>""", unsafe_allow_html=True)
     st.stop()
 
-# ── Step 1: search ──────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# STEP 1: SEARCH
+# ─────────────────────────────────────────────────────────────
+
 if search:
     if st.session_state["lookup_count"] >= MAX_LOOKUPS:
         st.error("Session lookup limit reached (20). Start a new browser session.")
@@ -347,16 +764,18 @@ if candidates is None:
 if not candidates:
     st.warning(
         f"No companies found matching **{company_name}**. "
-        "Try a shorter name (e.g. 'Eurotek' instead of 'Eurotek Foundry Products') "
-        "or select a specific country."
+        "Try a shorter name or select a specific country."
     )
     st.stop()
 
-# ── Step 2: picker ──────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# STEP 2: COMPANY PICKER
+# ─────────────────────────────────────────────────────────────
+
 def candidate_label(c):
     parts = [p for p in [
         c.get("jurisdiction", ""),
-        c.get("company_number", ""),            # <-- now shown for disambiguation
+        c.get("company_number", ""),
         c.get("company_type", ""),
         f"est. {c['incorporation_date'][:4]}" if c.get("incorporation_date") else "",
         c.get("status", ""),
@@ -366,7 +785,8 @@ def candidate_label(c):
 labels = [candidate_label(c) for c in candidates]
 
 if len(candidates) > 1 and not st.session_state.get("selected_co"):
-    st.markdown("**Multiple matches found — select the correct company:**")
+    st.markdown('<div class="ifc-card">', unsafe_allow_html=True)
+    st.markdown("**Multiple matches — select the correct company:**")
     chosen = st.radio("Select", labels, label_visibility="collapsed", key="picker")
     if st.button("Confirm selection →", type="primary"):
         st.session_state.update({
@@ -374,13 +794,17 @@ if len(candidates) > 1 and not st.session_state.get("selected_co"):
             "analysis_data": None, "revenue": 0,
             "net_result": 0, "financials_applied": False,
         })
+    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 elif not st.session_state.get("selected_co"):
     st.session_state["selected_co"] = candidates[0]
 
 selected = st.session_state["selected_co"]
 
-# ── Step 3: background analysis ──────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# STEP 3: BACKGROUND ANALYSIS
+# ─────────────────────────────────────────────────────────────
+
 if st.session_state.get("analysis_data") is None:
     with st.spinner(f"Fetching data for **{selected['name']}**…"):
         t0 = time.time()
@@ -392,7 +816,6 @@ if st.session_state.get("analysis_data") is None:
             "sanctions":  (fetch_sanctions,  (selected["name"],)),
             "financials": (fetch_financials, (selected["name"], jurisdiction, company_number)),
         }
-        # UK companies also get the profile endpoint (free health flags)
         if jurisdiction.upper() == "GB" and company_number:
             tasks["ch_profile"] = (fetch_ch_company_profile, (company_number,))
 
@@ -407,31 +830,43 @@ if st.session_state.get("analysis_data") is None:
     st.session_state["lookup_count"] += 1
 
 data, elapsed = st.session_state["analysis_data"]
-fin          = data.get("financials", {})
-ch_profile   = data.get("ch_profile", {})
+fin        = data.get("financials", {})
+ch_profile = data.get("ch_profile", {})
 auto_revenue = fin.get("revenue") if fin.get("found") and fin.get("revenue") else None
 
+# ─────────────────────────────────────────────────────────────
+# STEP 4: COMPANY HEADER + FINANCIALS
+# ─────────────────────────────────────────────────────────────
 
-# ── Step 4: financials entry ─────────────────────────────────
 cc = (selected.get("jurisdiction") or "")[:2].upper()
 source_name, source_url = FINANCIAL_SOURCE_URLS.get(cc, ("public registry / annual report", ""))
 
-st.markdown(f"### 📋 {selected['name']}")
-st.caption(
-    f"Jurisdiction: {selected.get('jurisdiction','—')} · "
-    f"Reg: {selected.get('company_number','—')} · "
-    f"Status: {selected.get('status','—')} · "
-    f"Incorporated: {selected.get('incorporation_date','—')}"
-)
+# Company header card
+st.markdown(f"""
+<div class="ifc-card" style="border-left: 3px solid #0d2240;">
+    <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div>
+            <div style="font-family:Georgia,serif; font-size:18px; font-weight:700; color:#0d2240; margin-bottom:4px">
+                {selected['name']}
+            </div>
+            <div style="font-size:12px; color:#9aaab8;">
+                {selected.get('jurisdiction','—')} &nbsp;·&nbsp;
+                Reg: {selected.get('company_number','—')} &nbsp;·&nbsp;
+                Status: {selected.get('status','—')} &nbsp;·&nbsp;
+                Inc: {selected.get('incorporation_date','—')}
+            </div>
+        </div>
+    </div>
+</div>""", unsafe_allow_html=True)
 
-# Companies House health flags banner (UK only)
+# CH health flags (UK only)
 if ch_profile.get("found"):
     flags = []
-    if ch_profile.get("is_liquidation"):       flags.append("🚨 In liquidation")
-    if ch_profile.get("is_administration"):    flags.append("🚨 In administration")
-    if ch_profile.get("is_dissolved"):         flags.append("🚨 Dissolved")
-    if ch_profile.get("accounts_overdue"):     flags.append("⚠️ Accounts overdue")
-    if ch_profile.get("confirmation_overdue"): flags.append("⚠️ Confirmation statement overdue")
+    if ch_profile.get("is_liquidation"):        flags.append("🚨 In liquidation")
+    if ch_profile.get("is_administration"):     flags.append("🚨 In administration")
+    if ch_profile.get("is_dissolved"):          flags.append("🚨 Dissolved")
+    if ch_profile.get("accounts_overdue"):      flags.append("⚠️ Accounts overdue")
+    if ch_profile.get("confirmation_overdue"):  flags.append("⚠️ Confirmation statement overdue")
     if ch_profile.get("has_insolvency_history"): flags.append("⚠️ Prior insolvency history")
     if flags:
         st.error(" · ".join(flags))
@@ -439,8 +874,9 @@ if ch_profile.get("found"):
         due = ch_profile.get("next_accounts_due") or "—"
         st.success(f"✅ Active · next accounts due {due}")
 
-st.divider()
-st.markdown("#### 💰 Financial Data")
+# Financial data card
+st.markdown('<div class="ifc-card">', unsafe_allow_html=True)
+st.markdown('<div class="card-label">Financial Data</div>', unsafe_allow_html=True)
 
 auto_net = fin.get("net_income") if fin.get("found") else None
 if auto_revenue:
@@ -454,8 +890,6 @@ if auto_revenue:
     if fin.get("filing_url"):
         st.caption(f"[📄 View original filing on Companies House]({fin['filing_url']})")
 
-    # For PDF-extracted figures, show the exact line the number came from so
-    # the user can verify against the source document.
     if fin.get("pdf_extracted"):
         with st.expander("🔍 Show extracted source lines (verify against PDF)"):
             if fin.get("pdf_source_line_revenue"):
@@ -466,10 +900,9 @@ if auto_revenue:
                 st.caption("Raw extracted text (first 2000 chars):")
                 st.code(fin["raw_text"][:2000], language="text")
 
-    # Trend display — multi-year table
     trend = fin.get("trend") or []
     if len(trend) >= 2:
-        st.markdown("**Revenue trend (most recent filings)**")
+        st.markdown("**Revenue trend**")
         trend_cols = st.columns(len(trend))
         for i, t in enumerate(trend):
             with trend_cols[i]:
@@ -485,38 +918,28 @@ if auto_revenue:
             arrow = "📈" if tlbl == "growing" else "📉" if tlbl == "declining" else "➡️"
             st.caption(f"{arrow} Year-over-year: **{yoy:+.1%}** ({tlbl})")
 else:
-    # Auto-extraction either fully failed or returned partial data.
     reason = fin.get("reason")
     if reason:
         st.warning(f"⚠️ {reason}")
     else:
         st.info("No automatic extraction available for this jurisdiction.")
 
-    # If the iXBRL had profit but no turnover (rare), surface it — it's still
-    # partial useful info even if revenue has to be entered manually.
     if fin.get("net_income_gbp") is not None and not fin.get("revenue"):
         ni = fin["net_income_gbp"]
-        st.caption(
-            f"ℹ️ Net profit was disclosed: £{ni/1e3:,.0f}K  ·  FY{fin.get('fiscal_year','—')}"
-        )
+        st.caption(f"ℹ️ Net profit was disclosed: £{ni/1e3:,.0f}K  ·  FY{fin.get('fiscal_year','—')}")
 
-    # ── Always show the link to the source, for UK companies especially
     if fin.get("filing_url"):
         st.markdown(f"📄 **[View filing history on Companies House]({fin['filing_url']})**")
     elif cc == "GB" and selected.get("company_number"):
         ch_url = f"https://find-and-update.company-information.service.gov.uk/company/{selected['company_number']}/filing-history"
         st.markdown(f"📄 **[View filing history on Companies House]({ch_url})**")
 
-    # ── UK PDF upload fallback ──────────────────────────────
-    # Only show for UK companies where auto-extraction failed AND the failure
-    # isn't due to a legal omission (filleted/micro) — in those cases the PDF
-    # won't have the figures either.
     has_legal_omission = fin.get("is_micro_entity") or fin.get("is_filleted")
     if cc == "GB" and not has_legal_omission:
         with st.expander("📎 Or upload the PDF and we'll try to extract automatically"):
             st.caption(
                 "Downloaded the PDF from Companies House? Drop it below, we'll try to pull "
-                "turnover and profit and pre-fill the fields. You can still edit them before running."
+                "turnover and profit and pre-fill the fields."
             )
             uploaded = st.file_uploader(
                 "PDF file", type=["pdf"], label_visibility="collapsed",
@@ -524,12 +947,9 @@ else:
             )
             if uploaded is not None:
                 pdf_bytes = uploaded.getvalue()
-
-                # Track OCR opt-in state per-file
                 ocr_key = f"ocr_requested_{selected.get('company_number','x')}_{len(pdf_bytes)}"
                 if ocr_key not in st.session_state:
                     st.session_state[ocr_key] = False
-
                 use_ocr = st.session_state[ocr_key]
 
                 with st.spinner("Running OCR on scanned PDF (this can take 30-90 seconds)…" if use_ocr else "Reading PDF…"):
@@ -545,7 +965,6 @@ else:
                         + (f", profit £{(pdf_result.get('net_income_gbp') or 0)/1e3:.0f}K"
                            if pdf_result.get("net_income_gbp") else "")
                     )
-                    # If OCR was used, surface warnings prominently
                     if pdf_result.get("ocr_extracted"):
                         for warn in (pdf_result.get("ocr_warnings") or []):
                             st.warning(f"⚠ {warn}")
@@ -555,37 +974,26 @@ else:
                             st.caption(f"Source line for profit:  `{pdf_result['pdf_source_line_profit']}`")
                     st.rerun()
                 else:
-                    # Extraction failed. Offer OCR if it's a scanned PDF and OCR
-                    # wasn't already attempted.
                     if pdf_result.get("is_scan_only") and not use_ocr and pdf_result.get("ocr_available"):
                         st.info(
-                            "📷 This PDF appears to be a scanned image, no machine-readable text. "
-                            "Text extraction can't help here. We can try OCR (image-to-text), "
-                            "but it takes 30-90 seconds and OCR sometimes misreads digits, so any "
-                            "figures it produces will need verification."
+                            "📷 This PDF appears to be a scanned image. We can try OCR, "
+                            "but it takes 30-90 seconds and figures will need verification."
                         )
-                        if st.button(
-                            "🔍 Try OCR on this PDF",
-                            key=f"ocr_btn_{selected.get('company_number','x')}",
-                        ):
+                        if st.button("🔍 Try OCR on this PDF",
+                                     key=f"ocr_btn_{selected.get('company_number','x')}"):
                             st.session_state[ocr_key] = True
                             st.rerun()
                     elif pdf_result.get("ocr_attempted"):
-                        st.warning(
-                            f"OCR completed but couldn't find figures: {pdf_result.get('reason','')}"
-                        )
+                        st.warning(f"OCR completed but couldn't find figures: {pdf_result.get('reason','')}")
                         if pdf_result.get("raw_text"):
-                            with st.expander("Show OCR text (search for the figures manually)"):
+                            with st.expander("Show OCR text"):
                                 st.code(pdf_result["raw_text"][:5000], language="text")
-                        st.caption("↓ Enter the figures manually below.")
                     else:
                         st.warning(f"Couldn't extract figures automatically: {pdf_result.get('reason','')}")
                         if pdf_result.get("raw_text"):
-                            with st.expander("Show raw text from your PDF (search for the figures manually)"):
+                            with st.expander("Show raw text from your PDF"):
                                 st.code(pdf_result["raw_text"][:5000], language="text")
-                        st.caption("↓ Enter the figures manually below.")
 
-    # Fallback info for non-UK
     if cc != "GB":
         manual_source = fin.get("manual_source") or source_name
         manual_url    = fin.get("manual_url") or source_url
@@ -596,6 +1004,8 @@ else:
     else:
         st.caption("↓ Enter the figures from the filing manually below, then click Run Assessment.")
 
+# Financials inputs (always shown)
+st.markdown('<div style="margin-top:12px"></div>', unsafe_allow_html=True)
 fc1, fc2, fc3 = st.columns([2, 2, 1])
 with fc1:
     rev_input = st.number_input(
@@ -623,20 +1033,20 @@ if st.button("Run Assessment →", type="primary", use_container_width=True):
         "fin_year": int(year_input),
         "financials_applied": True,
     })
-    # Propagate the user-confirmed fiscal year into the financials dict so the
-    # downstream report generator picks it up. This handles both: (a) the user
-    # manually overriding the year in the FY input, and (b) the case where the
-    # OCR / iXBRL path didn't successfully detect a year and the user's choice
-    # is the only authoritative source.
     if isinstance(data, dict) and isinstance(data.get("financials"), dict):
         data["financials"]["fiscal_year"] = str(int(year_input))
         st.session_state["analysis_data"] = (data, elapsed)
+
+st.markdown("</div>", unsafe_allow_html=True)  # close ifc-card
 
 if not st.session_state.get("financials_applied") and not auto_revenue:
     st.caption("↑ Enter financials and click **Run Assessment** to see the full score.")
     st.stop()
 
-# ── Step 5: results ──────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# STEP 5: RESULTS
+# ─────────────────────────────────────────────────────────────
+
 revenue    = st.session_state["revenue"] or (int(auto_revenue) if auto_revenue else 0)
 net_result = st.session_state["net_result"]
 
@@ -648,72 +1058,83 @@ sd           = result["summary_data"]
 news         = data.get("news", {})
 display_name = sd.get("name") or selected["name"]
 
-st.divider()
+st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
 
-if verdict == "proceed":
-    st.success(f"### ✅ Proceed — {display_name}")
-elif verdict == "caution":
-    st.warning(f"### ⚠️ Proceed with Caution — {display_name}")
-else:
-    st.error(f"### 🚫 Do Not Proceed — {display_name}")
+# Verdict banner + score
+_render_verdict_banner(verdict, display_name, score, st.session_state["fin_year"])
 
-st.caption(f"Score: {score}/100 · FY{st.session_state['fin_year']} · {date.today().isoformat()}")
-
-# Flags
+# Hard / soft flags
 for hf in result.get("hard_flags", []):
     st.error(f"🚨 {hf}")
 for sf in result.get("soft_flags", []):
     st.warning(f"⚠️ {sf}")
 
+# Narrative summary
 narrative = build_summary(selected["name"], result, data)
-st.markdown(narrative)
-st.divider()
+st.markdown(f"""
+<div class="ifc-card">
+    <div class="card-label">Assessment Summary</div>
+    <div style="font-size:14px; line-height:1.7; margin-top:8px; color:#2d3748">{narrative}</div>
+</div>""", unsafe_allow_html=True)
 
-st.markdown("#### Signal Breakdown")
-cols = st.columns(3)
-for i, (factor, (label, pts, max_pts)) in enumerate(signals.items()):
-    with cols[i % 3]:
-        pct  = pts / max_pts if max_pts > 0 else 0
-        icon = "🟢" if pct >= 0.75 else "🟡" if pct >= 0.45 else "🔴"
-        st.metric(f"{icon} {factor}", label, help=f"{pts}/{max_pts} pts")
+# Signal breakdown
+st.markdown('<div class="ifc-card">', unsafe_allow_html=True)
+st.markdown('<div class="card-label">Signal Breakdown</div>', unsafe_allow_html=True)
+st.markdown('<div style="margin-top:10px"></div>', unsafe_allow_html=True)
+_render_signal_cards(signals)
+st.markdown("</div>", unsafe_allow_html=True)
 
-st.divider()
+# Company details + news (two columns)
+left_col, right_col = st.columns([3, 2])
 
-st.markdown("#### Company Details")
-d1, d2 = st.columns(2)
-with d1:
-    for k, v in {
+with left_col:
+    details = {
         "Legal Name":   display_name,
         "Reg. Number":  selected.get("company_number") or "—",
         "Type":         selected.get("company_type") or "—",
         "Status":       selected.get("status") or "—",
         "Incorporated": selected.get("incorporation_date") or "—",
         "Address":      selected.get("registered_address") or "—",
-    }.items():
-        st.markdown(f"**{k}:** {v}")
-    if selected.get("source_url"):
-        st.markdown(f"[🔗 OpenCorporates]({selected['source_url']})")
-
-with d2:
+    }
     lei = sd.get("lei")
     if lei:
-        st.markdown(f"**LEI:** `{lei}`  \n**Status:** {sd.get('lei_status','—')}")
-    else:
-        st.markdown("**LEI:** Not found")
+        details["LEI"] = f"{lei} ({sd.get('lei_status','—')})"
+
+    rows_html = ""
+    for k, v in details.items():
+        rows_html += f'<div class="detail-row"><span class="detail-key">{k}</span><span class="detail-val">{v}</span></div>'
+    if selected.get("source_url"):
+        rows_html += f'<div class="detail-row"><span class="detail-key">OpenCorporates</span><span class="detail-val"><a href="{selected["source_url"]}" target="_blank">View record ↗</a></span></div>'
+
+    st.markdown(f"""
+    <div class="ifc-card">
+        <div class="card-label">Company Details</div>
+        <div style="margin-top:10px">{rows_html}</div>
+    </div>""", unsafe_allow_html=True)
+
+with right_col:
+    news_html = ""
     if news.get("found") and news.get("articles"):
-        st.markdown("**Recent News**")
         for a in news["articles"]:
             snt   = {"negative": "🔴", "neutral": "⚪"}.get(a.get("sentiment"), "⚪")
             title = a.get("title", "")
             url   = a.get("url", "")
             pub   = a.get("published", "")
-            st.markdown(f"{snt} [{title}]({url}) · *{pub}*" if url else f"{snt} {title} · *{pub}*")
+            link  = f'<a href="{url}" target="_blank">{title}</a>' if url else title
+            news_html += f'<div class="news-item">{snt} {link}<br><span style="font-size:11px;color:#9aaab8">{pub}</span></div>'
+    else:
+        news_html = '<div style="font-size:13px;color:#9aaab8">No recent news found.</div>'
 
-st.divider()
+    st.markdown(f"""
+    <div class="ifc-card">
+        <div class="card-label">Recent News</div>
+        <div style="margin-top:10px">{news_html}</div>
+    </div>""", unsafe_allow_html=True)
 
-# ── Assessment export ───────────────────────────────────────
-st.markdown("#### Export assessment")
-st.caption("Download the assessment to share with colleagues or attach to your credit file.")
+# Export
+st.markdown('<div class="ifc-card">', unsafe_allow_html=True)
+st.markdown('<div class="card-label">Export Assessment</div>', unsafe_allow_html=True)
+st.caption("Download the assessment to share with colleagues or attach to a credit file.")
 
 assessment_json = json.dumps(
     build_assessment_json(selected["name"], selected, result, data),
@@ -732,7 +1153,7 @@ with dl1:
         file_name=f"credit_assessment_{base_name}_{today_iso}.pdf",
         mime="application/pdf",
         use_container_width=True,
-        help="Branded credit memo — suitable for circulating internally or attaching to a credit file.",
+        help="Branded credit memo for internal circulation or credit file attachment.",
     )
 with dl2:
     st.download_button(
@@ -741,8 +1162,10 @@ with dl2:
         file_name=f"assessment_{base_name}_{today_iso}.json",
         mime="application/json",
         use_container_width=True,
-        help="Every input, signal, and source used. For audit, handover, or reproducing the assessment later.",
+        help="Every input, signal, and source used — for audit or reproducing the assessment.",
     )
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.caption(
     "Sources: OpenCorporates · GLEIF · Financial Modeling Prep · Companies House · "
